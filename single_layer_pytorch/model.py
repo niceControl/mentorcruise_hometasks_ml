@@ -1,4 +1,5 @@
 import torch
+import os
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
@@ -8,33 +9,15 @@ log = logging.getLogger(__name__)
 # Choose device for pytorch. Kept as
 device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
 
-# load input data
-data = torch.load("data/wine-white.pt")
-log.info(f"Initial slice of data: {data}")
-log.info(f"data size is {data.shape}")
-index = torch.randperm(data.shape[0])
-data = data[index]
-X, y = data[:, :-1], data[:, -1:]
-X_train, X_val = X[:3500], X[3500:]
-y_train, y_val = y[:3500], y[3500:]
-log.info(f"Train dataset: {X_train.shape}, {y_train.shape}")
-log.info(f"Validation dataset: {X_val.shape}, {y_val.shape}")
 
-# Normalize input data
-mean = X_train.mean(0)
-std = X_train.std(0)
-X_train_norm = (X_train - mean) / std
-X_val_norm = (X_val - mean) / std
-log.info(f"Normalized data: X_train: {X_train_norm} \n X_val: {X_val_norm}")
-
-# move all data to device - UNUSED due to train speed degradation on current example
-# X_train_norm = X_train_norm.to(device)
-# X_val_norm = X_val_norm.to(device)
-# y_train = y_train.to(device)
-# y_val = y_val.to(device)
-
-# create empty ADAM state
-adam_state = {}
+def load_data(filename):
+    dir = os.path.dirname(os.path.abspath(__file__))
+    data_path = os.path.join(dir, "data", filename)
+    if not os.path.exists(data_path):
+        data_path = os.path.join(dir, "single_layer_pytorch", "data", filename)
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(filename)
+    return torch.load(data_path)
 
 
 def init_params(in_features: int, hidden: int, out_features: int):
@@ -85,7 +68,7 @@ def sgd_step(params, lr: float):
 
 
 @torch.no_grad()
-def adam_step(params, adam_state, lr=0.05, beta1=0.9, beta2=0.999, eps=1e-8):
+def adam_step(params, adam_state, lr, beta1=0.9, beta2=0.999, eps=1e-8):
     for p in params:
         # skip params without gradient
         if p.grad is None:
@@ -114,8 +97,8 @@ def adam_step(params, adam_state, lr=0.05, beta1=0.9, beta2=0.999, eps=1e-8):
 
 
 @torch.no_grad()
-def evaluate(X: torch.Tensor, y: torch.Tensor, W1, b1, W2, b2, batch_size: int = 512):
-    # unction to measure model perf (calculate cost) on Validation dataset without changing weight
+def evaluate(X: torch.Tensor, y: torch.Tensor, W1, b1, W2, b2, batch_size=512):
+    # function to measure model perf (calculate cost) on Validation dataset without changing weight
     N = X.shape[0]  # number of examples
     total_loss = 0.0
 
@@ -130,14 +113,14 @@ def evaluate(X: torch.Tensor, y: torch.Tensor, W1, b1, W2, b2, batch_size: int =
 
         batch_loss = ((y_hat_batch - y_batch) ** 2).mean()
 
-        total_loss += (batch_loss.item() * X_batch.shape[0]) # to avoid different batch size contribution diff
+        total_loss += (batch_loss.item() * X_batch.shape[0])  # to avoid different batch size contribution diff
 
     total_loss = total_loss / N
     return total_loss
 
 
 def train(X_train: torch.Tensor, y_train: torch.Tensor, X_val: torch.Tensor,
-          y_val: torch.Tensor, epochs: int = 400, lr: float = 0.05, batch_size: int = 128):
+          y_val: torch.Tensor, epochs=400, lr: float = 0.055, batch_size=128):
 
     W1, b1, W2, b2 = init_params(X_train.shape[1], 5, 1)
     params = [W1, b1, W2, b2]
@@ -153,7 +136,7 @@ def train(X_train: torch.Tensor, y_train: torch.Tensor, X_val: torch.Tensor,
 
             loss = mse_loss(prediction, y_batch)
 
-            zero_grads(params) # reset old grads
+            zero_grads(params)  # reset old grads
             loss.backward()
             adam_step(params, adam_state, lr)
             train_loss_sum = loss.item() * X_batch.shape[0]
@@ -167,6 +150,42 @@ def train(X_train: torch.Tensor, y_train: torch.Tensor, X_val: torch.Tensor,
 
 
 if __name__ == "__main__":
+
+    # load input data
+    data = load_data('wine-white.pt')
+    log.info(f"Initial slice of data: {data}")
+    log.info(f"data size is {data.shape}")
+    index = torch.randperm(data.shape[0])
+    data = data[index]
+    X, y = data[:, :-1], data[:, -1:]
+    X_train, X_val = X[:3500], X[3500:]
+    y_train, y_val = y[:3500], y[3500:]
+    log.info(f"Train dataset: {X_train.shape}, {y_train.shape}")
+    log.info(f"Validation dataset: {X_val.shape}, {y_val.shape}")
+
+    # Normalize input data
+    mean = X_train.mean(0)
+    std = X_train.std(0)
+    X_train_norm = (X_train - mean) / std
+    X_val_norm = (X_val - mean) / std
+    log.info(f"Normalized data: X_train: {X_train_norm} \n X_val: {X_val_norm}")
+
+    # move all data to device - UNUSED due to train speed degradation on current example
+    # X_train_norm = X_train_norm.to(device)
+    # X_val_norm = X_val_norm.to(device)
+    # y_train = y_train.to(device)
+    # y_val = y_val.to(device)
+
+    # create empty ADAM state
+    adam_state = {}
     log.info('Starting model training')
-    model_params = train(X_train_norm, y_train, X_val_norm, y_val)
-    log.info(f"Model params: {model_params}")
+
+    W1, b1, W2, b2 = train(X_train_norm, y_train, X_val_norm, y_val)
+    model_params = {
+        "layer1.weight": W1,
+        "layer1.bias": b1,
+        "layer2.weight": W2,
+        "layer2.bias": b2,
+    }
+    for name, param in model_params.items():
+        log.info(f"{name}:\n{param.data}\n")
