@@ -1,2 +1,3 @@
 torch
 flake8
+numpy
