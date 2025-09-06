@@ -32,25 +32,32 @@ def init_params(in_features: int, hidden: int, out_features: int):
     return W1, b1, W2, b2
 
 
-def forward(X: torch.Tensor, W1: torch.Tensor, b1: torch.Tensor, W2: torch.Tensor, b2: torch.Tensor):
 
-    # Calculate z1 - preactivation of hidden layer
+def forward(X: torch.Tensor, W1: torch.Tensor, b1: torch.Tensor,
+            W2: torch.Tensor, b2: torch.Tensor, training: bool = True, p_drop: float = 0.5):
+    # hidden preactivation
     z1 = torch.matmul(X, W1) + b1
-
-    # Calculate h1 - post-activation of hidden layer
     h1 = torch.relu(z1)
 
-    # calculate prediction y hat
+    # apply dropout only during training
+    h1 = dropout(h1, p=p_drop, training=training)
+
+    # output
     y_hat = torch.matmul(h1, W2) + b2
-
     return y_hat
-
 
 def mse_loss(y_pred: torch.Tensor, y_true: torch.Tensor):
 
     loss = ((y_pred - y_true) ** 2).mean()
     loss.requires_grad_(True)
     return loss
+
+def cross_entropy_loss(logits: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+    probs = torch.softmax(logits, dim=1)             # convert logits to probabilities
+    N = logits.shape[0]
+    correct_class_probs = probs[torch.arange(N), y_true]
+    loss = -torch.log(correct_class_probs)
+    return loss.mean()
 
 
 def zero_grads(params):
@@ -96,57 +103,97 @@ def adam_step(params, adam_state, lr, beta1=0.9, beta2=0.999, eps=1e-8):
         p.data = p.data - lr * (m_hat / denominator)
 
 
+def dropout(X: torch.Tensor, p: float = 0.5, training: bool = True):
+    if not training or p == 0.0:
+        return X
+    mask = (torch.rand_like(X) > p).float()
+    # scale activations so expected value remains the same
+    return (X * mask) / (1.0 - p)
+
+
 @torch.no_grad()
-def evaluate(X: torch.Tensor, y: torch.Tensor, W1, b1, W2, b2, batch_size=512):
-    # function to measure model perf (calculate cost) on Validation dataset without changing weight
-    N = X.shape[0]  # number of examples
-    total_loss = 0.0
+def evaluate(X, y, W1, b1, W2, b2, batch_size=512, task="regression"):
+    N = X.shape[0]
+    total_loss, total_correct, total_seen = 0.0, 0, 0
 
     for i in range(0, N, batch_size):
         X_batch = X[i:i+batch_size]
         y_batch = y[i:i+batch_size]
 
-        z1 = torch.matmul(X_batch, W1) + b1
-        h1 = torch.relu(z1)
+        out = forward(X_batch, W1, b1, W2, b2, training=False)
 
-        y_hat_batch = torch.matmul(h1, W2) + b2
+        if task == "regression":
+            batch_loss = ((out - y_batch) ** 2).mean()
+            total_loss += batch_loss.item() * X_batch.shape[0]
+        else:
+            y_idx = torch.clamp(y_batch.view(-1).to(torch.long) - 1, 0, 9)
+            batch_loss = cross_entropy_loss(out, y_idx)
+            total_loss += batch_loss.item() * X_batch.shape[0]
 
-        batch_loss = ((y_hat_batch - y_batch) ** 2).mean()
+            preds = out.argmax(dim=1)
+            total_correct += (preds == y_idx).sum().item()
 
-        total_loss += (batch_loss.item() * X_batch.shape[0])  # to avoid different batch size contribution diff
+        total_seen += X_batch.shape[0]
 
-    total_loss = total_loss / N
-    return total_loss
+    avg_loss = total_loss / max(1, total_seen)
+    if task == "regression":
+        return avg_loss
+    else:
+        return avg_loss, total_correct / total_seen
 
 
 def train(X_train: torch.Tensor, y_train: torch.Tensor, X_val: torch.Tensor,
-          y_val: torch.Tensor, epochs=400, lr: float = 0.055, batch_size=128):
+          y_val: torch.Tensor, epochs=4000, lr: float = 0.055, batch_size=128,
+          task: str = "regression"):
+    """
+    task: "regression" (default) or "classification"
+    Classification expects y to contain integer marks 1..10.
+    """
 
-    W1, b1, W2, b2 = init_params(X_train.shape[1], 5, 1)
+    if task not in ("regression", "classification"):
+        raise ValueError("task must be 'regression' or 'classification'")
+
+    # choose output size
+    out_features = 1 if task == "regression" else 10
+
+    W1, b1, W2, b2 = init_params(X_train.shape[1], 5, out_features)
     params = [W1, b1, W2, b2]
     N = X_train.shape[0]
 
     for epoch in range(1, epochs + 1):
         train_loss_sum = 0.0
+
         for i in range(0, N, batch_size):
             X_batch = X_train[i:i+batch_size]
             y_batch = y_train[i:i+batch_size]
 
-            prediction = forward(X_batch, W1, b1, W2, b2)
+            prediction = forward(X_batch, W1, b1, W2, b2, training=True, p_drop=0.3)
 
-            loss = mse_loss(prediction, y_batch)
+            if task == "regression":
+                loss = mse_loss(prediction, y_batch)
+            else:
+                y_idx = torch.clamp(y_batch.view(-1).to(torch.long) - 1, 0, 9)
+                loss = cross_entropy_loss(prediction, y_idx)
 
-            zero_grads(params)  # reset old grads
+            zero_grads(params)
             loss.backward()
             adam_step(params, adam_state, lr)
-            train_loss_sum = loss.item() * X_batch.shape[0]
 
+            train_loss_sum += loss.item() * X_batch.shape[0]
+
+        # periodic eval
         if (epoch == 1) or (epoch == epochs) or (epoch % 25 == 0):
-            train_mse = train_loss_sum / N 
-            val_mse = evaluate(X_val, y_val, W1, b1, W2, b2, batch_size=512)
-            log.info(f"Epoch: {epoch}, train_MSE: {train_mse}, val_mse: {val_mse}")
+            if task == "regression":
+                train_mse = train_loss_sum / N
+                val_mse = evaluate(X_val, y_val, W1, b1, W2, b2, batch_size=512, task="regression")
+                log.info(f"[{task}] Epoch: {epoch}, train_MSE: {train_mse:.6f}, val_mse: {val_mse:.6f}")
+            else:
+                train_ce = train_loss_sum / N
+                val_ce, val_acc = evaluate(X_val, y_val, W1, b1, W2, b2, batch_size=512, task="classification")
+                log.info(f"[{task}] Epoch: {epoch}, train_CE: {train_ce:.6f}, val_CE: {val_ce:.6f}, val_acc: {val_acc:.4f}")
 
-    return W1, b1 , W2, b2
+    return W1, b1, W2, b2
+
 
 
 if __name__ == "__main__":
@@ -178,14 +225,28 @@ if __name__ == "__main__":
 
     # create empty ADAM state
     adam_state = {}
-    log.info('Starting model training')
+    log.info('Starting model training - REGRESSION')
 
-    W1, b1, W2, b2 = train(X_train_norm, y_train, X_val_norm, y_val)
-    model_params = {
-        "layer1.weight": W1,
-        "layer1.bias": b1,
-        "layer2.weight": W2,
-        "layer2.bias": b2,
+    W1_reg, b1_reg, W2_reg, b2_reg = train(X_train_norm, y_train, X_val_norm, y_val, task='regression')
+    model_params_regression = {
+        "layer1.weight": W1_reg,
+        "layer1.bias": b1_reg,
+        "layer2.weight": W2_reg,
+        "layer2.bias": b2_reg,
     }
-    for name, param in model_params.items():
+
+
+    log.info('Starting model training - Classification')
+
+    W1_cls, b1_cls, W2_cls, b2_cls = train(X_train_norm, y_train, X_val_norm, y_val, task='classification')
+    model_params_cls = {
+        "layer1.weight": W1_cls,
+        "layer1.bias": b1_cls,
+        "layer2.weight": W2_cls,
+        "layer2.bias": b2_cls,
+    }
+    for name, param in model_params_regression.items():
+        log.info(f"{name}:\n{param.data}\n")
+
+    for name, param in model_params_cls.items():
         log.info(f"{name}:\n{param.data}\n")
